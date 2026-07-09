@@ -105,7 +105,12 @@ func (d *Dag) New(f NewJob) (JobItf, error) {
 			})
 		}
 	}
-	return f(nodes, edges)
+
+	if f != nil {
+		return f(nodes, edges)
+	}
+
+	return NewDefaultJob(nodes, edges)
 }
 
 func NewDag() *Dag {

@@ -35,20 +35,6 @@ type Job struct {
 	done   chan struct{}
 }
 
-func NewDefaultJob(nodes []NodeItf, edges []*Edge) (JobItf, error) {
-	j := &Job{
-		nodes: make(map[string]NodeItf),
-		edges: edges,
-		state: JobStateReady,
-		done:  make(chan struct{}),
-	}
-	for _, n := range nodes {
-		j.nodes[n.ID()] = n
-	}
-	j.ctx, j.cancel = context.WithCancel(context.Background())
-	return j, nil
-}
-
 func (j *Job) Execute(message json.RawMessage) error {
 	j.mu.Lock()
 	if j.state != JobStateReady {
@@ -203,4 +189,18 @@ func (j *Job) State() JobState {
 
 func (j *Job) Done() <-chan struct{} {
 	return j.done
+}
+
+func NewDefaultJob(nodes []NodeItf, edges []*Edge) (JobItf, error) {
+	j := &Job{
+		nodes: make(map[string]NodeItf),
+		edges: edges,
+		state: JobStateReady,
+		done:  make(chan struct{}),
+	}
+	for _, n := range nodes {
+		j.nodes[n.ID()] = n
+	}
+	j.ctx, j.cancel = context.WithCancel(context.Background())
+	return j, nil
 }
