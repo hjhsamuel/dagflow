@@ -1,7 +1,7 @@
 package dagflow
 
 import (
-	"encoding/json"
+	"context"
 
 	"github.com/google/uuid"
 )
@@ -9,10 +9,10 @@ import (
 type NodeItf interface {
 	ID() string
 	Name() string
-	Execute(message json.RawMessage) (json.RawMessage, error)
+	Execute(ctx context.Context, message map[string]any) (map[string]any, error)
 }
 
-type NodeExecute func(message json.RawMessage) (json.RawMessage, error)
+type NodeExecute func(ctx context.Context, message map[string]any) (map[string]any, error)
 
 type Node struct {
 	id   string
@@ -28,9 +28,9 @@ func (n *Node) Name() string {
 	return n.name
 }
 
-func (n *Node) Execute(message json.RawMessage) (json.RawMessage, error) {
+func (n *Node) Execute(ctx context.Context, message map[string]any) (map[string]any, error) {
 	if n.f != nil {
-		return n.f(message)
+		return n.f(ctx, message)
 	}
 	return nil, nil
 }

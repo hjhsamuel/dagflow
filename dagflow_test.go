@@ -1,7 +1,9 @@
 package dagflow
 
 import (
-	"encoding/json"
+	"context"
+	"fmt"
+	"maps"
 	"sync"
 	"testing"
 	"time"
@@ -71,7 +73,7 @@ func TestJob_ExecuteAsync(t *testing.T) {
 	d := NewDag()
 	count := 0
 	mu := sync.Mutex{}
-	f := func(message json.RawMessage) (json.RawMessage, error) {
+	f := func(ctx context.Context, message map[string]any) (map[string]any, error) {
 		mu.Lock()
 		count++
 		mu.Unlock()
@@ -84,10 +86,10 @@ func TestJob_ExecuteAsync(t *testing.T) {
 
 	// n1 -> n2 (always true)
 	// n1 -> n3 (always false)
-	d.AddEdge(n1, n2, func(message json.RawMessage) (json.RawMessage, bool) {
+	d.AddEdge(n1, n2, func(message map[string]any) (map[string]any, bool) {
 		return message, true
 	})
-	d.AddEdge(n1, n3, func(message json.RawMessage) (json.RawMessage, bool) {
+	d.AddEdge(n1, n3, func(message map[string]any) (map[string]any, bool) {
 		return nil, false
 	})
 
@@ -96,7 +98,7 @@ func TestJob_ExecuteAsync(t *testing.T) {
 		t.Fatalf("Failed to create job: %v", err)
 	}
 
-	err = job.Execute(json.RawMessage(`"hello"`))
+	err = job.Execute(map[string]any{"data": "hello"})
 	if err != nil {
 		t.Fatalf("Job execution failed: %v", err)
 	}
@@ -122,7 +124,7 @@ func TestJob_ExecuteAsync(t *testing.T) {
 func TestJob_ParallelExecution(t *testing.T) {
 	d := NewDag()
 	start := time.Now()
-	f := func(message json.RawMessage) (json.RawMessage, error) {
+	f := func(ctx context.Context, message map[string]any) (map[string]any, error) {
 		time.Sleep(100 * time.Millisecond)
 		return nil, nil
 	}
@@ -134,8 +136,8 @@ func TestJob_ParallelExecution(t *testing.T) {
 	// n1 -> n2
 	// n1 -> n3
 	// n2 and n3 should run in parallel
-	d.AddEdge(n1, n2, func(message json.RawMessage) (json.RawMessage, bool) { return nil, true })
-	d.AddEdge(n1, n3, func(message json.RawMessage) (json.RawMessage, bool) { return nil, true })
+	d.AddEdge(n1, n2, func(message map[string]any) (map[string]any, bool) { return nil, true })
+	d.AddEdge(n1, n3, func(message map[string]any) (map[string]any, bool) { return nil, true })
 
 	job, _ := d.New(NewDefaultJob)
 	job.Execute(nil)
@@ -154,27 +156,27 @@ func TestJob_DataPassing(t *testing.T) {
 	var finalMsg string
 	mu := sync.Mutex{}
 
-	n1 := NewNode("n1", func(message json.RawMessage) (json.RawMessage, error) {
-		return json.RawMessage(`"data from n1"`), nil
+	n1 := NewNode("n1", func(ctx context.Context, message map[string]any) (map[string]any, error) {
+		return map[string]any{"data": "data from n1"}, nil
 	})
-	n2 := NewNode("n2", func(message json.RawMessage) (json.RawMessage, error) {
+	n2 := NewNode("n2", func(ctx context.Context, message map[string]any) (map[string]any, error) {
 		mu.Lock()
-		finalMsg = string(message)
+		finalMsg = fmt.Sprintf("%v", message["data"])
 		mu.Unlock()
 		return nil, nil
 	})
 
-	d.AddEdge(n1, n2, func(message json.RawMessage) (json.RawMessage, bool) {
+	d.AddEdge(n1, n2, func(message map[string]any) (map[string]any, bool) {
 		// Transform message in edge
-		msg := "transformed " + string(message)
-		return json.RawMessage(msg), true
+		msg := "transformed " + fmt.Sprintf("%v", message["data"])
+		return map[string]any{"data": msg}, true
 	})
 
 	job, _ := d.New(NewDefaultJob)
 	job.Execute(nil)
 	<-job.Done()
 
-	expected := `transformed "data from n1"`
+	expected := "transformed data from n1"
 	if finalMsg != expected {
 		t.Errorf("Expected %s, got %s", expected, finalMsg)
 	}
@@ -188,7 +190,7 @@ func TestJob_SkipMiddleNode(t *testing.T) {
 	mu := sync.Mutex{}
 
 	f := func(name string, p *bool) NodeExecute {
-		return func(message json.RawMessage) (json.RawMessage, error) {
+		return func(ctx context.Context, message map[string]any) (map[string]any, error) {
 			mu.Lock()
 			*p = true
 			mu.Unlock()
@@ -205,8 +207,8 @@ func TestJob_SkipMiddleNode(t *testing.T) {
 	// Even if n2 -> n3 is true, if n2 is skipped, n3 should be skipped?
 	// Or n3 executes with nil input?
 	// According to my current logic: if n2 hasInput is false, it doesn't execute and its out-edges don't activate.
-	d.AddEdge(n1, n2, func(message json.RawMessage) (json.RawMessage, bool) { return nil, false })
-	d.AddEdge(n2, n3, func(message json.RawMessage) (json.RawMessage, bool) { return nil, true })
+	d.AddEdge(n1, n2, func(message map[string]any) (map[string]any, bool) { return nil, false })
+	d.AddEdge(n2, n3, func(message map[string]any) (map[string]any, bool) { return nil, true })
 
 	job, _ := d.New(NewDefaultJob)
 	job.Execute(nil)
@@ -225,29 +227,29 @@ func TestJob_SkipMiddleNode(t *testing.T) {
 
 func TestJob_MultiInput(t *testing.T) {
 	d := NewDag()
-	n3Input := ""
+	var n3Input map[string]any
 	mu := sync.Mutex{}
 
-	n0 := NewNode("n0", func(message json.RawMessage) (json.RawMessage, error) {
+	n0 := NewNode("n0", func(ctx context.Context, message map[string]any) (map[string]any, error) {
 		return message, nil
 	})
-	n1 := NewNode("n1", func(message json.RawMessage) (json.RawMessage, error) {
-		return json.RawMessage(`"n1"`), nil
+	n1 := NewNode("n1", func(ctx context.Context, message map[string]any) (map[string]any, error) {
+		return map[string]any{"v1": "n1"}, nil
 	})
-	n2 := NewNode("n2", func(message json.RawMessage) (json.RawMessage, error) {
-		return json.RawMessage(`"n2"`), nil
+	n2 := NewNode("n2", func(ctx context.Context, message map[string]any) (map[string]any, error) {
+		return map[string]any{"v2": "n2"}, nil
 	})
-	n3 := NewNode("n3", func(message json.RawMessage) (json.RawMessage, error) {
+	n3 := NewNode("n3", func(ctx context.Context, message map[string]any) (map[string]any, error) {
 		mu.Lock()
-		n3Input = string(message)
+		n3Input = maps.Clone(message)
 		mu.Unlock()
 		return nil, nil
 	})
 
-	d.AddEdge(n0, n1, func(message json.RawMessage) (json.RawMessage, bool) { return message, true })
-	d.AddEdge(n0, n2, func(message json.RawMessage) (json.RawMessage, bool) { return message, true })
-	d.AddEdge(n1, n3, func(message json.RawMessage) (json.RawMessage, bool) { return message, true })
-	d.AddEdge(n2, n3, func(message json.RawMessage) (json.RawMessage, bool) { return message, true })
+	d.AddEdge(n0, n1, func(message map[string]any) (map[string]any, bool) { return message, true })
+	d.AddEdge(n0, n2, func(message map[string]any) (map[string]any, bool) { return message, true })
+	d.AddEdge(n1, n3, func(message map[string]any) (map[string]any, bool) { return message, true })
+	d.AddEdge(n2, n3, func(message map[string]any) (map[string]any, bool) { return message, true })
 
 	job, err := d.New(NewDefaultJob)
 	if err != nil {
@@ -256,8 +258,83 @@ func TestJob_MultiInput(t *testing.T) {
 	job.Execute(nil)
 	<-job.Done()
 
-	// Current logic is last-one-wins for nodeResults.
-	if n3Input != `"n1"` && n3Input != `"n2"` {
-		t.Errorf("Expected n3 to receive input from n1 or n2, got %s", n3Input)
+	// Multi-input should merge results
+	if n3Input["v1"] != "n1" || n3Input["v2"] != "n2" {
+		t.Errorf("Expected n3 to receive merged input from n1 and n2, got %v", n3Input)
 	}
+}
+
+func TestJob_CancelWait(t *testing.T) {
+	d := NewDag()
+	var mu sync.Mutex
+	runningCount := 0
+	maxRunningCount := 0
+	completedCount := 0
+
+	f := func(ctx context.Context, message map[string]any) (map[string]any, error) {
+		mu.Lock()
+		runningCount++
+		if runningCount > maxRunningCount {
+			maxRunningCount = runningCount
+		}
+		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			runningCount--
+			mu.Unlock()
+		}()
+
+		// Simulate work
+		select {
+		case <-time.After(200 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+
+		mu.Lock()
+		completedCount++
+		mu.Unlock()
+		return nil, nil
+	}
+
+	n1 := NewNode("n1", f)
+	n2 := NewNode("n2", f)
+	n3 := NewNode("n3", f)
+
+	// n1 -> n2, n1 -> n3
+	d.AddEdge(n1, n2, func(message map[string]any) (map[string]any, bool) { return nil, true })
+	d.AddEdge(n1, n3, func(message map[string]any) (map[string]any, bool) { return nil, true })
+
+	job, _ := d.New(NewDefaultJob)
+	job.Execute(nil)
+
+	// Wait for n1 to start and finish, then n2/n3 to start
+	time.Sleep(300 * time.Millisecond)
+
+	mu.Lock()
+	if runningCount == 0 {
+		mu.Unlock()
+		t.Fatal("Expected nodes to be running")
+	}
+	mu.Unlock()
+
+	job.Cancel()
+
+	// 立即检查是否还在运行。
+	// 这里可能还是 > 0，因为 Cancel 刚被调用。
+	// 但 Done() 不应该关闭。
+	select {
+	case <-job.Done():
+		t.Fatal("Done should not be closed immediately after Cancel if nodes are still running")
+	default:
+		// OK
+	}
+
+	<-job.Done()
+
+	mu.Lock()
+	if runningCount != 0 {
+		t.Errorf("Expected 0 running nodes after Cancel and Done, got %d", runningCount)
+	}
+	mu.Unlock()
 }

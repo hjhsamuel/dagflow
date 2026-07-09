@@ -1,8 +1,6 @@
 package dagflow
 
-import "encoding/json"
-
-type EdgeFunc func(message json.RawMessage) (json.RawMessage, bool)
+type EdgeFunc func(message map[string]any) (map[string]any, bool)
 
 type Edge struct {
 	from string
@@ -10,7 +8,7 @@ type Edge struct {
 	f    EdgeFunc
 }
 
-func (e *Edge) Do(message json.RawMessage) (json.RawMessage, bool) {
+func (e *Edge) Do(message map[string]any) (map[string]any, bool) {
 	if e.f != nil {
 		return e.f(message)
 	}

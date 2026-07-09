@@ -2,8 +2,8 @@ package dagflow
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"maps"
 	"sync"
 )
 
@@ -17,7 +17,7 @@ const (
 )
 
 type JobItf interface {
-	Execute(message json.RawMessage) error
+	Execute(message map[string]any) error
 	Cancel()
 	State() JobState
 	Done() <-chan struct{}
@@ -26,16 +26,29 @@ type JobItf interface {
 type NewJob func(nodes []NodeItf, edges []*Edge) (JobItf, error)
 
 type Job struct {
-	nodes  map[string]NodeItf
-	edges  []*Edge
-	state  JobState
-	mu     sync.RWMutex
+	nodes map[string]NodeItf
+	edges []*Edge
+	state JobState
+	mu    sync.RWMutex
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
+	wg     sync.WaitGroup
+
+	inDegree    map[string]int
+	inDegreeMu  sync.Mutex
+	adj         map[string][]*Edge
+	nodeResults map[string]map[string]any
+	resMu       sync.Mutex
+	ready       chan string
+
+	processedCount int
+	processedMu    sync.Mutex
+	allDone        chan struct{}
 }
 
-func (j *Job) Execute(message json.RawMessage) error {
+func (j *Job) Execute(message map[string]any) error {
 	j.mu.Lock()
 	if j.state != JobStateReady {
 		j.mu.Unlock()
@@ -43,6 +56,9 @@ func (j *Job) Execute(message json.RawMessage) error {
 	}
 	j.state = JobStateRunning
 	j.mu.Unlock()
+
+	j.buildExecutionPlan()
+	j.prepareInitialNodes(message)
 
 	go func() {
 		defer func() {
@@ -54,120 +70,132 @@ func (j *Job) Execute(message json.RawMessage) error {
 			j.mu.Unlock()
 		}()
 
-		inDegree, adj := j.buildExecutionPlan()
-		nodeResults := make(map[string]json.RawMessage)
-		var resMu sync.Mutex
-		ready := make(chan string, len(j.nodes))
-
-		j.prepareInitialNodes(message, inDegree, nodeResults, ready, &resMu)
-
-		j.runScheduler(inDegree, adj, nodeResults, ready, &resMu)
+		j.runScheduler()
 	}()
 
 	return nil
 }
 
-func (j *Job) buildExecutionPlan() (map[string]int, map[string][]*Edge) {
-	inDegree := make(map[string]int)
-	adj := make(map[string][]*Edge)
+func (j *Job) buildExecutionPlan() {
+	j.inDegree = make(map[string]int)
+	j.adj = make(map[string][]*Edge)
 
 	for id := range j.nodes {
-		inDegree[id] = 0
+		j.inDegree[id] = 0
 	}
 
 	for _, edge := range j.edges {
-		adj[edge.from] = append(adj[edge.from], edge)
-		inDegree[edge.to]++
+		j.adj[edge.from] = append(j.adj[edge.from], edge)
+		j.inDegree[edge.to]++
 	}
-	return inDegree, adj
 }
 
-func (j *Job) prepareInitialNodes(message json.RawMessage, inDegree map[string]int, nodeResults map[string]json.RawMessage, ready chan string, resMu *sync.Mutex) {
-	for id, degree := range inDegree {
+func (j *Job) prepareInitialNodes(message map[string]any) {
+	j.nodeResults = make(map[string]map[string]any)
+	j.ready = make(chan string, len(j.nodes))
+
+	for id, degree := range j.inDegree {
 		if degree == 0 {
-			ready <- id
-			resMu.Lock()
-			nodeResults[id] = message
-			resMu.Unlock()
+			j.ready <- id
+			j.resMu.Lock()
+			j.nodeResults[id] = maps.Clone(message)
+			j.resMu.Unlock()
 		}
 	}
 }
 
-func (j *Job) runScheduler(inDegree map[string]int, adj map[string][]*Edge, nodeResults map[string]json.RawMessage, ready chan string, resMu *sync.Mutex) {
-	var wg sync.WaitGroup
-	inDegreeMu := sync.Mutex{}
-	processedCount := 0
-	processedMu := sync.Mutex{}
-	allDone := make(chan struct{})
+func (j *Job) runScheduler() {
+	j.processedCount = 0
+	j.allDone = make(chan struct{})
 
 	go func() {
 		for {
 			select {
 			case <-j.ctx.Done():
 				return
-			case nodeID, ok := <-ready:
+			case nodeID, ok := <-j.ready:
 				if !ok {
 					return
 				}
-				wg.Add(1)
-				go j.executeNode(nodeID, inDegree, adj, nodeResults, ready, resMu, &inDegreeMu, &wg, func() {
-					processedMu.Lock()
-					processedCount++
-					if processedCount == len(j.nodes) {
-						close(allDone)
-					}
-					processedMu.Unlock()
-				})
-			case <-allDone:
+				j.wg.Add(1)
+				go j.executeNode(nodeID)
+			case <-j.allDone:
 				return
 			}
 		}
 	}()
 
-	<-allDone
-	wg.Wait()
-	close(ready)
+	select {
+	case <-j.ctx.Done():
+	case <-j.allDone:
+	}
+	j.wg.Wait()
+	close(j.ready)
 }
 
-func (j *Job) executeNode(id string, inDegree map[string]int, adj map[string][]*Edge, nodeResults map[string]json.RawMessage, ready chan string, resMu *sync.Mutex, inDegreeMu *sync.Mutex, wg *sync.WaitGroup, onDone func()) {
-	defer wg.Done()
-	defer onDone()
+func (j *Job) executeNode(id string) {
+	defer j.wg.Done()
+	defer func() {
+		j.processedMu.Lock()
+		j.processedCount++
+		if j.processedCount == len(j.nodes) {
+			select {
+			case <-j.allDone:
+			default:
+				close(j.allDone)
+			}
+		}
+		j.processedMu.Unlock()
+	}()
+
+	select {
+	case <-j.ctx.Done():
+		return
+	default:
+	}
 
 	node := j.nodes[id]
-	resMu.Lock()
-	input, hasInput := nodeResults[id]
-	resMu.Unlock()
+	j.resMu.Lock()
+	input, hasInput := j.nodeResults[id]
+	j.resMu.Unlock()
 
-	var result json.RawMessage
+	var result map[string]any
 	var err error
 	if hasInput {
-		result, err = node.Execute(input)
+		result, err = node.Execute(j.ctx, input)
 		if err != nil {
 			j.Cancel()
 			return
 		}
 	}
 
-	inDegreeMu.Lock()
-	defer inDegreeMu.Unlock()
-	for _, edge := range adj[id] {
+	j.inDegreeMu.Lock()
+	defer j.inDegreeMu.Unlock()
+	for _, edge := range j.adj[id] {
 		nextID := edge.to
 
 		activated := false
-		var nextMsg json.RawMessage
+		var nextMsg map[string]any
 		if hasInput {
 			nextMsg, activated = edge.Do(result)
 		}
 
 		if activated {
-			resMu.Lock()
-			nodeResults[nextID] = nextMsg
-			resMu.Unlock()
+			j.resMu.Lock()
+			if j.nodeResults[nextID] == nil {
+				j.nodeResults[nextID] = nextMsg
+			} else {
+				maps.Copy(j.nodeResults[nextID], nextMsg)
+			}
+			j.resMu.Unlock()
 		}
 
-		inDegree[nextID]--
-		if inDegree[nextID] == 0 {
-			ready <- nextID
+		j.inDegree[nextID]--
+		if j.inDegree[nextID] == 0 {
+			select {
+			case j.ready <- nextID:
+			case <-j.ctx.Done():
+			}
 		}
 	}
 }
