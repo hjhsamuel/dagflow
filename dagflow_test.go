@@ -8,23 +8,63 @@ import (
 )
 
 func TestDag_Check(t *testing.T) {
-	d := NewDag()
-	n1 := NewNode("n1", nil)
-	n2 := NewNode("n2", nil)
-	n3 := NewNode("n3", nil)
+	t.Run("Valid DAG with one start node", func(t *testing.T) {
+		d := NewDag()
+		n1 := NewNode("n1", nil)
+		n2 := NewNode("n2", nil)
+		n3 := NewNode("n3", nil)
 
-	d.AddEdge(n1, n2, nil)
-	d.AddEdge(n2, n3, nil)
+		d.AddEdge(n1, n2, nil)
+		d.AddEdge(n2, n3, nil)
 
-	if !d.Check() {
-		t.Error("Expected DAG to be valid")
-	}
+		if !d.Check() {
+			t.Error("Expected DAG to be valid")
+		}
+	})
 
-	// Create cycle
-	d.AddEdge(n3, n1, nil)
-	if d.Check() {
-		t.Error("Expected DAG to be invalid (cycle)")
-	}
+	t.Run("Invalid DAG with cycle", func(t *testing.T) {
+		d := NewDag()
+		n1 := NewNode("n1", nil)
+		n2 := NewNode("n2", nil)
+		n3 := NewNode("n3", nil)
+
+		d.AddEdge(n1, n2, nil)
+		d.AddEdge(n2, n3, nil)
+		d.AddEdge(n3, n1, nil)
+
+		if d.Check() {
+			t.Error("Expected DAG to be invalid (cycle)")
+		}
+	})
+
+	t.Run("Invalid DAG with multiple start nodes", func(t *testing.T) {
+		d := NewDag()
+		n1 := NewNode("n1", nil)
+		n2 := NewNode("n2", nil)
+		n3 := NewNode("n3", nil)
+		n4 := NewNode("n4", nil)
+
+		d.AddEdge(n1, n2, nil)
+		d.AddEdge(n3, n4, nil)
+
+		if d.Check() {
+			t.Error("Expected DAG to be invalid (multiple start nodes)")
+		}
+	})
+
+	t.Run("Invalid DAG with no start nodes", func(t *testing.T) {
+		d := NewDag()
+		n1 := NewNode("n1", nil)
+		n2 := NewNode("n2", nil)
+
+		// Self loop or cycle without entry
+		d.AddEdge(n1, n2, nil)
+		d.AddEdge(n2, n1, nil)
+
+		if d.Check() {
+			t.Error("Expected DAG to be invalid (no start nodes)")
+		}
+	})
 }
 
 func TestJob_ExecuteAsync(t *testing.T) {
@@ -188,6 +228,9 @@ func TestJob_MultiInput(t *testing.T) {
 	n3Input := ""
 	mu := sync.Mutex{}
 
+	n0 := NewNode("n0", func(message json.RawMessage) (json.RawMessage, error) {
+		return message, nil
+	})
 	n1 := NewNode("n1", func(message json.RawMessage) (json.RawMessage, error) {
 		return json.RawMessage(`"n1"`), nil
 	})
@@ -201,10 +244,15 @@ func TestJob_MultiInput(t *testing.T) {
 		return nil, nil
 	})
 
+	d.AddEdge(n0, n1, func(message json.RawMessage) (json.RawMessage, bool) { return message, true })
+	d.AddEdge(n0, n2, func(message json.RawMessage) (json.RawMessage, bool) { return message, true })
 	d.AddEdge(n1, n3, func(message json.RawMessage) (json.RawMessage, bool) { return message, true })
 	d.AddEdge(n2, n3, func(message json.RawMessage) (json.RawMessage, bool) { return message, true })
 
-	job, _ := d.New(NewDefaultJob)
+	job, err := d.New(NewDefaultJob)
+	if err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
 	job.Execute(nil)
 	<-job.Done()
 

@@ -35,6 +35,9 @@ func (d *Dag) Check() bool {
 			queue = append(queue, id)
 		}
 	}
+	if len(queue) != 1 {
+		return false
+	}
 
 	count := 0
 	for len(queue) > 0 {
