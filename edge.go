@@ -2,10 +2,17 @@ package dagflow
 
 import "encoding/json"
 
-type EdgeCheck func(message json.RawMessage) (json.RawMessage, bool)
+type EdgeFunc func(message json.RawMessage) (json.RawMessage, bool)
 
 type Edge struct {
 	from string
 	to   string
-	f    EdgeCheck
+	f    EdgeFunc
+}
+
+func (e *Edge) Do(message json.RawMessage) (json.RawMessage, bool) {
+	if e.f != nil {
+		return e.f(message)
+	}
+	return nil, false
 }

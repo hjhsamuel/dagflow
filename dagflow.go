@@ -1,7 +1,5 @@
 package dagflow
 
-import "encoding/json"
-
 type Dag struct {
 	nodes map[string]NodeItf
 	edges map[string]*Edge
@@ -17,7 +15,7 @@ func (d *Dag) AddEdge(from, to NodeItf) bool {
 	panic("not implemented")
 }
 
-func (d *Dag) Execute(message json.RawMessage) error {
+func (d *Dag) New(f NewJob) (JobItf, error) {
 	// TODO
 	panic("not implemented")
 }
