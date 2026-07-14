@@ -2,8 +2,10 @@ package dagflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -337,4 +339,214 @@ func TestJob_CancelWait(t *testing.T) {
 		t.Errorf("Expected 0 running nodes after Cancel and Done, got %d", runningCount)
 	}
 	mu.Unlock()
+}
+
+func TestJob_EmptyDagCompletes(t *testing.T) {
+	job, err := NewDag().New(nil)
+	if err != nil {
+		t.Fatalf("Failed to create empty job: %v", err)
+	}
+	if err := job.Execute(nil); err != nil {
+		t.Fatalf("Failed to execute empty job: %v", err)
+	}
+
+	select {
+	case <-job.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Empty job did not complete")
+	}
+	if job.State() != JobStateFinished {
+		t.Fatalf("Expected empty job to finish, got %v", job.State())
+	}
+}
+
+func TestJob_CancelBeforeExecuteCompletes(t *testing.T) {
+	job, err := NewDag().New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job.Cancel()
+
+	select {
+	case <-job.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Cancelled ready job did not complete")
+	}
+	if job.State() != JobStateCancelled {
+		t.Fatalf("Expected cancelled state, got %v", job.State())
+	}
+	if err := job.Execute(nil); err == nil {
+		t.Fatal("Expected executing a cancelled job to fail")
+	}
+}
+
+func TestJob_NilEdgeIsUnconditional(t *testing.T) {
+	d := NewDag()
+	n1 := NewNode("start", func(ctx context.Context, message map[string]any) (map[string]any, error) {
+		return map[string]any{"value": "passed"}, nil
+	})
+	var received string
+	n2 := NewNode("end", func(ctx context.Context, message map[string]any) (map[string]any, error) {
+		received = message["value"].(string)
+		return nil, nil
+	})
+	d.AddEdge(n1, n2, nil)
+
+	job, err := d.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := job.Execute(nil); err != nil {
+		t.Fatal(err)
+	}
+	<-job.Done()
+	if received != "passed" {
+		t.Fatalf("Expected nil edge to pass data, got %q", received)
+	}
+}
+
+func TestJob_ReportsNodeError(t *testing.T) {
+	want := errors.New("node failed")
+	d := NewDag()
+	n1 := NewNode("start", func(ctx context.Context, message map[string]any) (map[string]any, error) {
+		return nil, want
+	})
+	n2 := NewNode("end", nil)
+	d.AddEdge(n1, n2, nil)
+
+	job, err := d.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := job.Execute(nil); err != nil {
+		t.Fatal(err)
+	}
+	<-job.Done()
+	if !errors.Is(JobError(job), want) {
+		t.Fatalf("Expected wrapped node error, got %v", JobError(job))
+	}
+	if job.State() != JobStateCancelled {
+		t.Fatalf("Expected failed job to be cancelled, got %v", job.State())
+	}
+}
+
+func TestJob_ConvertsPanicToError(t *testing.T) {
+	d := NewDag()
+	n1 := NewNode("start", func(ctx context.Context, message map[string]any) (map[string]any, error) {
+		panic("boom")
+	})
+	n2 := NewNode("end", nil)
+	d.AddEdge(n1, n2, nil)
+
+	job, err := d.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := job.Execute(nil); err != nil {
+		t.Fatal(err)
+	}
+	<-job.Done()
+	if JobError(job) == nil || !strings.Contains(JobError(job).Error(), "boom") {
+		t.Fatalf("Expected panic error, got %v", JobError(job))
+	}
+}
+
+func TestJob_ConvertsEdgePanicToError(t *testing.T) {
+	d := NewDag()
+	n1 := NewNode("start", func(ctx context.Context, message map[string]any) (map[string]any, error) {
+		return message, nil
+	})
+	n2 := NewNode("end", nil)
+	d.AddEdge(n1, n2, func(message map[string]any) (map[string]any, bool) {
+		panic("edge boom")
+	})
+
+	job, err := d.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := job.Execute(nil); err != nil {
+		t.Fatal(err)
+	}
+	<-job.Done()
+	if JobError(job) == nil || !strings.Contains(JobError(job).Error(), "edge boom") {
+		t.Fatalf("Expected edge panic error, got %v", JobError(job))
+	}
+}
+
+func TestJob_CancelWaitsForContextIgnoringNode(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	d := NewDag()
+	n1 := NewNode("start", func(ctx context.Context, message map[string]any) (map[string]any, error) {
+		close(started)
+		<-release
+		return nil, nil
+	})
+	n2 := NewNode("end", nil)
+	d.AddEdge(n1, n2, nil)
+
+	job, err := d.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := job.Execute(nil); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	job.Cancel()
+	select {
+	case <-job.Done():
+		t.Fatal("Done closed before the running node returned")
+	default:
+	}
+	close(release)
+	select {
+	case <-job.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Cancelled job did not finish after its node returned")
+	}
+}
+
+func TestJob_IsolatesBranchMessages(t *testing.T) {
+	d := NewDag()
+	n0 := NewNode("start", func(ctx context.Context, message map[string]any) (map[string]any, error) {
+		return map[string]any{"value": "initial"}, nil
+	})
+
+	ready := sync.WaitGroup{}
+	ready.Add(2)
+	release := make(chan struct{})
+	var first, second map[string]any
+	n1 := NewNode("first", func(ctx context.Context, message map[string]any) (map[string]any, error) {
+		ready.Done()
+		<-release
+		message["value"] = "first"
+		first = message
+		return nil, nil
+	})
+	n2 := NewNode("second", func(ctx context.Context, message map[string]any) (map[string]any, error) {
+		ready.Done()
+		<-release
+		message["value"] = "second"
+		second = message
+		return nil, nil
+	})
+	d.AddEdge(n0, n1, nil)
+	d.AddEdge(n0, n2, nil)
+
+	job, err := d.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := job.Execute(nil); err != nil {
+		t.Fatal(err)
+	}
+	ready.Wait()
+	close(release)
+	<-job.Done()
+
+	if first["value"] != "first" || second["value"] != "second" {
+		t.Fatalf("Branch messages were shared: first=%v second=%v", first, second)
+	}
 }

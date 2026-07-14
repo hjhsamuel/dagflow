@@ -1,16 +1,27 @@
 package dagflow
 
-import "errors"
+import (
+	"errors"
+	"sync"
+)
 
 type Dag struct {
 	nodes map[string]NodeItf
 	edges map[string]map[string]EdgeFunc
+	mu    sync.RWMutex
 }
 
 // Check
 //
 // Verify the validity of the DAG.
 func (d *Dag) Check() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.check()
+}
+
+// check verifies the DAG while the caller holds at least a read lock.
+func (d *Dag) check() bool {
 	if len(d.nodes) == 0 {
 		return true
 	}
@@ -29,7 +40,7 @@ func (d *Dag) Check() bool {
 		}
 	}
 
-	var queue []string
+	queue := make([]string, 0, len(d.nodes))
 	for id, degree := range inDegree {
 		if degree == 0 {
 			queue = append(queue, id)
@@ -40,9 +51,8 @@ func (d *Dag) Check() bool {
 	}
 
 	count := 0
-	for len(queue) > 0 {
-		u := queue[0]
-		queue = queue[1:]
+	for head := 0; head < len(queue); head++ {
+		u := queue[head]
 		count++
 
 		for _, v := range adj[u] {
@@ -63,26 +73,31 @@ func (d *Dag) AddEdge(from, to NodeItf, f EdgeFunc) bool {
 	if from == nil || to == nil {
 		return false
 	}
+	fromID, toID := from.ID(), to.ID()
+	if fromID == "" || toID == "" {
+		return false
+	}
 
-	if v, fok := d.edges[from.ID()]; fok {
-		if _, tok := v[to.ID()]; tok {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if v, fok := d.edges[fromID]; fok {
+		if _, tok := v[toID]; tok {
 			return false
 		}
 	}
 
-	if _, ok := d.nodes[from.ID()]; !ok {
-		d.nodes[from.ID()] = from
+	if _, ok := d.nodes[fromID]; !ok {
+		d.nodes[fromID] = from
 	}
-	if _, ok := d.nodes[to.ID()]; !ok {
-		d.nodes[to.ID()] = to
+	if _, ok := d.nodes[toID]; !ok {
+		d.nodes[toID] = to
 	}
 
-	if _, ok := d.edges[from.ID()]; !ok {
-		d.edges[from.ID()] = make(map[string]EdgeFunc)
+	if _, ok := d.edges[fromID]; !ok {
+		d.edges[fromID] = make(map[string]EdgeFunc)
 	}
-	if _, ok := d.edges[from.ID()][to.ID()]; !ok {
-		d.edges[from.ID()][to.ID()] = f
-	}
+	d.edges[fromID][toID] = f
 
 	return true
 }
@@ -91,14 +106,20 @@ func (d *Dag) AddEdge(from, to NodeItf, f EdgeFunc) bool {
 //
 // Copy the DAG and return a new JobItf.
 func (d *Dag) New(f NewJob) (JobItf, error) {
-	if !d.Check() {
+	d.mu.RLock()
+	if !d.check() {
+		d.mu.RUnlock()
 		return nil, errors.New("invalid DAG")
 	}
 	nodes := make([]NodeItf, 0, len(d.nodes))
 	for _, node := range d.nodes {
 		nodes = append(nodes, node)
 	}
-	edges := make([]*Edge, 0, len(d.edges))
+	edgeCount := 0
+	for _, outgoing := range d.edges {
+		edgeCount += len(outgoing)
+	}
+	edges := make([]*Edge, 0, edgeCount)
 	for pre, v := range d.edges {
 		for next, ef := range v {
 			edges = append(edges, &Edge{
@@ -108,6 +129,7 @@ func (d *Dag) New(f NewJob) (JobItf, error) {
 			})
 		}
 	}
+	d.mu.RUnlock()
 
 	if f != nil {
 		return f(nodes, edges)

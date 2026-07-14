@@ -42,7 +42,7 @@ When a node has multiple incoming edges (multiple parent nodes), the data from a
 ### Merging Logic
 - The library uses `maps.Copy` to merge results from multiple edges.
 - **Important**: If multiple upstream nodes or edges provide the same key in their result maps, the values will be overwritten. The final value depends on the completion order of the upstream nodes.
-- **Data Isolation**: Each `Node` and `EdgeFunc` should ideally return a new map or be aware that the input map is shared among concurrent downstream edges to prevent race conditions or unexpected side effects.
+- **Data Isolation**: Top-level message maps are shallow-cloned for each downstream node. Nodes may safely change top-level keys, but nested maps, slices, pointers, and other referenced values remain shared unless the application clones them.
 
 ### Avoiding Field Conflicts
 - **Recommendation**: To avoid unexpected behavior, ensure that different upstream nodes use unique keys or carefully design the `EdgeFunc` to handle potential field overlaps.
@@ -52,8 +52,10 @@ When a node has multiple incoming edges (multiple parent nodes), the data from a
 ## Error Handling & Cancellation
 
 - If a `Node` returns an error, the `Job` will be cancelled automatically.
+- Use `dagflow.JobError(job)` after `Done()` is closed to retrieve a node error or a recovered panic. Default jobs also implement the optional `JobErrorItf` interface.
 - Use `job.Cancel()` to manually stop the execution.
 - Context is propagated to all nodes, allowing for graceful shutdown of long-running tasks.
+- A `nil` edge function is an unconditional edge and passes the upstream message through unchanged.
 
 ## Quick Start
 

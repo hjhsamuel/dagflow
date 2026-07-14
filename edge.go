@@ -24,5 +24,5 @@ func (e *Edge) Do(message map[string]any) (map[string]any, bool) {
 	if e.f != nil {
 		return e.f(message)
 	}
-	return nil, false
+	return message, true
 }
